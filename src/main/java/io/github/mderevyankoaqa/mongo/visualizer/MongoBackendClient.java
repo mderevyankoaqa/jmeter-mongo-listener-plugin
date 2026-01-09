@@ -16,13 +16,10 @@ import org.bson.Document;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
-
-
 
 /**
  * Backend listener for JMeter that sends sample results in bulk to MongoDB.
@@ -39,6 +36,7 @@ public class MongoBackendClient extends AbstractBackendListenerClient {
     public static final String BATCH_SIZE = "batch.size";
     public static final String SAVE_RESPONSE_BODY = "save.response.body";
     public static final String ENVIRONMENT = "environment";
+    public static final String REPORT_ID = "report_id";
 
     private MongoClient mongoClient;
     private MongoCollection<Document> collection;
@@ -47,7 +45,9 @@ public class MongoBackendClient extends AbstractBackendListenerClient {
     private String environment;
     private int batchSize;
     private String saveResponseBodyMode;
+
     private String runId;
+    private String reportId;
 
     private final List<Document> batch = new ArrayList<>();
     private static final Logger log = LoggerFactory.getLogger(MongoBackendClient.class);
@@ -62,6 +62,7 @@ public class MongoBackendClient extends AbstractBackendListenerClient {
         arguments.addArgument(BATCH_SIZE, "10");
         arguments.addArgument(SAVE_RESPONSE_BODY, "onError"); // options: onError, always, off
         arguments.addArgument(ENVIRONMENT, "env");
+        arguments.addArgument(REPORT_ID, ""); // Default is empty string
         return arguments;
     }
 
@@ -78,6 +79,11 @@ public class MongoBackendClient extends AbstractBackendListenerClient {
         this.batchSize = context.getIntParameter(BATCH_SIZE, 1000);
         this.saveResponseBodyMode = context.getParameter(SAVE_RESPONSE_BODY, "onError");
         this.environment = context.getParameter(ENVIRONMENT, "env");
+
+        // Read report_id from user input (defaults to "" if empty)
+        this.reportId = context.getParameter(REPORT_ID, "");
+
+        // Always generate a unique run_id for this execution
         this.runId = UUID.randomUUID().toString();
 
         // Initialize MongoDB client
@@ -97,8 +103,8 @@ public class MongoBackendClient extends AbstractBackendListenerClient {
         MongoDatabase database = mongoClient.getDatabase(databaseName);
         collection = database.getCollection(collectionName);
 
-        log.info("MongoBackendClient initialized: database='{}', collection='{}', run_id={}",
-                databaseName, collectionName, runId);
+        log.info("MongoBackendClient initialized: database='{}', collection='{}', run_id={}, report_id='{}'",
+                databaseName, collectionName, runId, reportId);
     }
 
     @Override
@@ -138,7 +144,15 @@ public class MongoBackendClient extends AbstractBackendListenerClient {
         int finishedThreads = startedThreads - activeThreads;
         boolean isTransactionController = label.startsWith(transactionControllerPrefix);
 
+        // Create the Main Document with Flattened Fields (No Metadata Object)
         Document doc = new Document()
+                // --- Metadata (Now at Root) ---
+                .append("report_id", reportId)
+                .append("environment", environment)
+                .append("run_id", runId)
+                .append("test_name", "") // Placeholder for consistency
+
+                // --- Metrics ---
                 .append("threadName", result.getThreadName())
                 .append("label", label)
                 .append("parentLabel", parentLabel)
@@ -149,12 +163,10 @@ public class MongoBackendClient extends AbstractBackendListenerClient {
                 .append("responseMessage", responseMessage)
                 .append("responseBody", responseBody)
                 .append("assertions", assertionMessages.toString())
-                 .append(mongoTimeField, timestamp)
+                .append(mongoTimeField, timestamp)
                 .append("activeThreads", activeThreads)
                 .append("startedThreads", startedThreads)
-                .append("finishedThreads", finishedThreads)
-                .append("environment", environment)
-                .append("run_id", runId);
+                .append("finishedThreads", finishedThreads);
 
         synchronized (batch) {
             batch.add(doc);
@@ -173,9 +185,10 @@ public class MongoBackendClient extends AbstractBackendListenerClient {
 
         try {
             collection.insertMany(new ArrayList<>(batch));
-            log.info("Inserted {} documents into MongoDB", batch.size());
+            // Log the run_id with every batch insert
+            log.info("Run ID: {} | Inserted {} documents into MongoDB", runId, batch.size());
         } catch (Exception e) {
-            log.error("Error inserting batch to MongoDB: {}", e.getMessage(), e);
+            log.error("Run ID: {} | Error inserting batch to MongoDB: {}", runId, e.getMessage(), e);
         } finally {
             batch.clear();
         }
